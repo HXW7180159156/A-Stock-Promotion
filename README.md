@@ -7,6 +7,7 @@ A股智能选股策略引擎 — 纯 Python、零第三方依赖的 A 股 / ETF 
 - [技术架构及方案](docs/TECHNICAL_ARCHITECTURE.md)
 - [代码实现方案](docs/IMPLEMENTATION_PLAN.md)
 - [测试计划](docs/TEST_PLAN.md)
+- [云端部署指南](docs/DEPLOYMENT.md)
 
 ## 快速开始
 
@@ -16,6 +17,15 @@ python -m unittest discover -s tests
 
 # 在 http://127.0.0.1:8080 启动内置 REST API + Web UI
 PYTHONPATH=src python -m a_stock_promotion.api
+```
+
+> 云端部署（Docker / Render / Railway / K8s / 云主机）见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+> 入口已支持 `HOST` / `PORT` 环境变量，容器默认绑定 `0.0.0.0:8080`。
+
+```bash
+# 一键构建并启动容器
+docker build -t a-stock-promotion .
+docker run --rm -p 8080:8080 a-stock-promotion
 ```
 
 内置两个单页应用：
