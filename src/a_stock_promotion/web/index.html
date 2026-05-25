@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>A股智能选股 MVP</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>A股智能选股</h1>
+    <span class="badge">MVP</span>
+  </header>
+
+  <div class="risk-banner" id="risk-banner" role="note">
+    本服务仅用于投资研究，不构成投资建议或收益承诺，投资有风险，入市需谨慎。
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="config" role="tab">策略配置</button>
+    <button class="tab" data-tab="results" role="tab">选股结果</button>
+    <button class="tab" data-tab="detail" role="tab">个股详情</button>
+  </nav>
+
+  <main>
+    <!-- 策略配置 -->
+    <section class="panel is-active" data-panel="config">
+      <label class="field">
+        <span>选择策略模板</span>
+        <select id="strategy-select"></select>
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>交易所</span>
+          <select id="filter-exchange">
+            <option value="">不限</option>
+            <option value="SH">上交所</option>
+            <option value="SZ">深交所</option>
+            <option value="BJ">北交所</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>板块</span>
+          <select id="filter-sector"><option value="">不限</option></select>
+        </label>
+      </div>
+      <label class="field">
+        <span>行业</span>
+        <select id="filter-industry"><option value="">不限</option></select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="filter-tradable" checked>
+        <span>仅显示可交易标的</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="filter-include-st">
+        <span>包含ST/退市风险标的</span>
+      </label>
+      <div class="strategy-summary" id="strategy-summary"></div>
+      <button class="primary" id="run-button">运行选股</button>
+    </section>
+
+    <!-- 选股结果 -->
+    <section class="panel" data-panel="results">
+      <p class="muted" id="results-summary">尚未运行选股。</p>
+      <ul class="result-list" id="result-list"></ul>
+    </section>
+
+    <!-- 个股详情 -->
+    <section class="panel" data-panel="detail">
+      <p class="muted" id="detail-placeholder">从选股结果中选择一只标的查看详情。</p>
+      <article id="detail-card" hidden>
+        <header>
+          <h2 id="detail-title"></h2>
+          <p class="muted" id="detail-subtitle"></p>
+        </header>
+        <h3>指标</h3>
+        <table class="metrics-table" id="detail-metrics"></table>
+        <p class="risk-note" id="detail-risk"></p>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footer">A股智能选股 MVP · 数据为样例，仅供研究</footer>
+  <script src="/app.js"></script>
+</body>
+</html>
