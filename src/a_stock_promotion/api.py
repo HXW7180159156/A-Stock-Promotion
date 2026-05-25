@@ -1,14 +1,23 @@
-"""Zero-dependency REST API exposing the MVP selection engine.
+"""Zero-dependency REST API exposing the MVP + V1.0 surface.
 
 Wraps :mod:`a_stock_promotion` with a small ``http.server`` based service
-that satisfies PRD §4.1 (API surface for strategy configuration, candidate
-ranking and stock detail) without introducing any third-party runtime
-dependencies.  Serves the static mobile-friendly UI bundled under
-``src/a_stock_promotion/web/``.
+that satisfies PRD §4.1 (MVP) and §4.2 (V1.0: ETF module, 组合再平衡,
+桌面端/管理端, 回测/参数优化/样本外验证, 运营榜单) without introducing
+any third-party runtime dependencies.
 
-Run with ``python -m a_stock_promotion.api`` to start the bundled service
-on ``http://localhost:8080``.  The handler is exposed as a class so it
-can also be embedded in production servers (e.g. behind gunicorn) later.
+Endpoints
+---------
+* Strategy catalogue & screening (MVP)
+* Stock pool listing / detail (MVP)
+* ETF pool listing / detail / screening (V1.0)
+* Portfolio rebalance planner (V1.0)
+* Backtest / grid optimisation / walk-forward (V1.0)
+* Operational leaderboards (V1.0)
+* Admin strategy registry (V1.0)
+* Mobile SPA at ``/`` and desktop SPA at ``/desktop``
+
+Run with ``python -m a_stock_promotion.api`` to start the bundled
+service on ``http://127.0.0.1:8080``.
 """
 
 from __future__ import annotations
@@ -16,18 +25,35 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .admin import StrategyRegistry, StrategyRegistryError
+from .backtesting import (
+    BacktestConfig,
+    BacktestEngine,
+    PriceBar,
+    constant_metrics_provider,
+    time_series_metrics_provider,
+)
 from .data_sources import SampleFundamentalProvider, SampleSentimentProvider
+from .etf_pool import ETFFeatureAggregator, ETFListing, ETFPool, sample_etf_pool
 from .features import FeatureAggregator
+from .leaderboards import LeaderboardBuilder
 from .models import StrategyProfile
+from .optimization import (
+    GridSearchOptimizer,
+    score_calmar,
+    score_sharpe,
+    score_total_return,
+)
+from .portfolio import Holding, build_rebalance_plan, plan_from_selection
 from .selection_engine import SelectionEngine
 from .stock_pool import StockListing, StockPool, sample_stock_pool
-from .strategies import list_builtin_strategies
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +63,14 @@ RISK_DISCLOSURE = (
     "投资有风险，入市需谨慎。"
 )
 
-# Symbols are A-share style codes (digits, optionally exchange prefix).
+# Symbols are A-share / ETF style codes (digits, optionally exchange prefix).
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,16}$")
+_NAME_RE = re.compile(r"^[^\x00-\x1f]{1,64}$")  # printable, ≤64 chars
+_SCORE_FUNCTIONS = {
+    "sharpe": score_sharpe,
+    "total_return": score_total_return,
+    "calmar": score_calmar,
+}
 
 
 class APIService:
@@ -48,30 +80,41 @@ class APIService:
         self,
         aggregator: FeatureAggregator | None = None,
         strategies: Iterable[StrategyProfile] | None = None,
+        etf_aggregator: ETFFeatureAggregator | None = None,
+        registry: StrategyRegistry | None = None,
     ) -> None:
         self.aggregator = aggregator or FeatureAggregator(
             pool=sample_stock_pool(),
             fundamental_provider=SampleFundamentalProvider(),
             sentiment_provider=SampleSentimentProvider(),
         )
-        templates = list(strategies) if strategies is not None else list_builtin_strategies()
-        self._strategies: dict[str, StrategyProfile] = {
-            strategy.name: strategy for strategy in templates
-        }
+        self.etf_aggregator = etf_aggregator or ETFFeatureAggregator(
+            pool=sample_etf_pool(),
+        )
+        self.registry = registry or StrategyRegistry(
+            builtin_strategies=list(strategies) if strategies is not None else None,
+        )
         self.engine = SelectionEngine()
+        self.backtest_engine = BacktestEngine(self.engine)
+        self.optimizer = GridSearchOptimizer(self.backtest_engine)
+        self.leaderboards = LeaderboardBuilder(self.engine)
 
     # ---- Strategy catalogue ------------------------------------------------
 
     def list_strategies(self) -> list[dict]:
-        return [_strategy_to_dict(strategy) for strategy in self._strategies.values()]
+        return [_strategy_to_dict(record.strategy) for record in self.registry.list()]
+
+    def list_strategy_records(self) -> list[dict]:
+        return [record.as_dict() for record in self.registry.list()]
 
     def get_strategy(self, name: str) -> StrategyProfile | None:
-        return self._strategies.get(name)
+        record = self.registry.get(name)
+        return record.strategy if record else None
 
     # ---- Stock pool --------------------------------------------------------
 
-    def list_stocks(self, filters: dict) -> list[dict]:
-        pool = self._apply_pool_filters(self.aggregator.pool, filters)
+    def list_stocks(self, filters: Mapping[str, Any]) -> list[dict]:
+        pool = self._apply_stock_filters(self.aggregator.pool, filters)
         return [_listing_to_dict(listing) for listing in pool]
 
     def get_stock_detail(self, symbol: str) -> dict | None:
@@ -85,13 +128,32 @@ class APIService:
             "risk_disclosure": RISK_DISCLOSURE,
         }
 
+    # ---- ETF pool ----------------------------------------------------------
+
+    def list_etfs(self, filters: Mapping[str, Any]) -> list[dict]:
+        pool = self._apply_etf_filters(self.etf_aggregator.pool, filters)
+        return [_etf_listing_to_dict(listing) for listing in pool]
+
+    def get_etf_detail(self, symbol: str) -> dict | None:
+        listing = self.etf_aggregator.pool.get(symbol)
+        if listing is None:
+            return None
+        metrics = self.etf_aggregator.build(listing)
+        return {
+            "listing": _etf_listing_to_dict(listing),
+            "metrics": metrics.metrics,
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
     # ---- Selection ---------------------------------------------------------
 
-    def run_selection(self, strategy_name: str, filters: dict) -> dict:
+    def run_selection(
+        self, strategy_name: str, filters: Mapping[str, Any]
+    ) -> dict:
         strategy = self.get_strategy(strategy_name)
         if strategy is None:
             raise KeyError(strategy_name)
-        pool = self._apply_pool_filters(self.aggregator.pool, filters)
+        pool = self._apply_stock_filters(self.aggregator.pool, filters)
         candidates = self.aggregator.build_many(list(pool))
         ranked = self.engine.rank(candidates, strategy)
         return {
@@ -100,11 +162,283 @@ class APIService:
             "risk_disclosure": RISK_DISCLOSURE,
         }
 
+    def run_etf_selection(
+        self, strategy_name: str, filters: Mapping[str, Any]
+    ) -> dict:
+        strategy = self.get_strategy(strategy_name)
+        if strategy is None:
+            raise KeyError(strategy_name)
+        pool = self._apply_etf_filters(self.etf_aggregator.pool, filters)
+        candidates = self.etf_aggregator.build_many(list(pool))
+        ranked = self.engine.rank(candidates, strategy)
+        return {
+            "strategy": _strategy_to_dict(strategy),
+            "results": [_result_to_dict(item) for item in ranked],
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    # ---- Portfolio rebalance ----------------------------------------------
+
+    def run_rebalance(self, payload: Mapping[str, Any]) -> dict:
+        universe = str(payload.get("universe", "etf")).lower()
+        if universe not in {"etf", "stock"}:
+            raise ValueError("universe must be 'etf' or 'stock'")
+        strategy_name = payload.get("strategy")
+        if not isinstance(strategy_name, str) or not strategy_name:
+            raise ValueError("strategy is required")
+        strategy = self.get_strategy(strategy_name)
+        if strategy is None:
+            raise KeyError(strategy_name)
+        filters = payload.get("filters") or {}
+        if not isinstance(filters, Mapping):
+            raise ValueError("filters must be an object")
+        top_n = _coerce_int(payload.get("top_n", 5), "top_n", lo=1, hi=50)
+        scheme = str(payload.get("scheme", "equal"))
+        if scheme not in {"equal", "score"}:
+            raise ValueError("scheme must be 'equal' or 'score'")
+        max_weight = _coerce_float(
+            payload.get("max_weight", 1.0), "max_weight", lo=0.01, hi=1.0
+        )
+        transaction_cost = _coerce_float(
+            payload.get("transaction_cost", 0.001),
+            "transaction_cost",
+            lo=0.0,
+            hi=0.5,
+        )
+        min_trade = _coerce_float(
+            payload.get("min_trade", 0.005), "min_trade", lo=0.0, hi=1.0
+        )
+        only_selected = _coerce_bool(payload.get("only_selected", True))
+
+        current_holdings = _parse_holdings(payload.get("current") or [])
+
+        if universe == "etf":
+            pool = self._apply_etf_filters(self.etf_aggregator.pool, filters)
+            candidates = self.etf_aggregator.build_many(list(pool))
+        else:
+            pool = self._apply_stock_filters(self.aggregator.pool, filters)
+            candidates = self.aggregator.build_many(list(pool))
+
+        ranked = self.engine.rank(candidates, strategy)
+        plan = plan_from_selection(
+            ranked,
+            current=current_holdings,
+            top_n=top_n,
+            scheme=scheme,
+            max_weight=max_weight,
+            transaction_cost=transaction_cost,
+            min_trade=min_trade,
+            only_selected=only_selected,
+        )
+        return {
+            "strategy": _strategy_to_dict(strategy),
+            "universe": universe,
+            "plan": plan.as_dict(),
+            "candidates": [_result_to_dict(item) for item in ranked[:top_n]],
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    # ---- Backtest / optimisation ------------------------------------------
+
+    def run_backtest(self, payload: Mapping[str, Any]) -> dict:
+        strategy_name = payload.get("strategy")
+        if not isinstance(strategy_name, str) or not strategy_name:
+            raise ValueError("strategy is required")
+        strategy = self.get_strategy(strategy_name)
+        if strategy is None:
+            raise KeyError(strategy_name)
+        price_data = _parse_price_data(payload.get("price_data"))
+        metrics_provider, names = _parse_metrics_provider(payload.get("metrics"))
+        cfg = _parse_backtest_config(payload.get("config") or {})
+        # Validation: cap workload to keep the API bounded.
+        _enforce_backtest_limits(price_data, cfg)
+
+        result = self.backtest_engine.run(
+            strategy=strategy,
+            price_data=price_data,
+            metrics_provider=metrics_provider,
+            config=cfg,
+            names=names,
+        )
+        return {
+            "strategy": _strategy_to_dict(strategy),
+            "summary": _backtest_summary(result),
+            "equity_curve": [
+                {"date": date, "equity": equity}
+                for date, equity in zip(result.dates, result.equity_curve, strict=True)
+            ],
+            "rebalances": [
+                {
+                    "date": event.date,
+                    "holdings": list(event.holdings),
+                    "weights": list(event.weights),
+                    "turnover": event.turnover,
+                    "cost": event.cost,
+                }
+                for event in result.rebalances
+            ],
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    def run_optimization(self, payload: Mapping[str, Any]) -> dict:
+        strategy_name = payload.get("strategy")
+        if not isinstance(strategy_name, str) or not strategy_name:
+            raise ValueError("strategy is required")
+        base_strategy = self.get_strategy(strategy_name)
+        if base_strategy is None:
+            raise KeyError(strategy_name)
+        parameter_grid = payload.get("parameter_grid") or {}
+        if not isinstance(parameter_grid, Mapping):
+            raise ValueError("parameter_grid must be an object")
+        # Bound the grid to prevent runaway combinatorics.
+        total = 1
+        for axis_values in parameter_grid.values():
+            if not isinstance(axis_values, list) or not axis_values:
+                raise ValueError(
+                    "each parameter axis must be a non-empty list"
+                )
+            total *= len(axis_values)
+        if total > 64:
+            raise ValueError("parameter grid has too many combinations (max 64)")
+
+        price_data = _parse_price_data(payload.get("price_data"))
+        metrics_provider, names = _parse_metrics_provider(payload.get("metrics"))
+        cfg = _parse_backtest_config(payload.get("config") or {})
+        _enforce_backtest_limits(price_data, cfg)
+        score_fn = _SCORE_FUNCTIONS[_validated_score(payload.get("score", "sharpe"))]
+
+        factory = _make_threshold_factory(base_strategy)
+        report = self.optimizer.run(
+            strategy_factory=factory,
+            parameter_grid=parameter_grid,
+            price_data=price_data,
+            metrics_provider=metrics_provider,
+            config=cfg,
+            score_fn=score_fn,
+            names=names,
+        )
+        return {
+            "strategy": _strategy_to_dict(base_strategy),
+            "score": getattr(score_fn, "__name__", "score"),
+            "trials": [
+                {
+                    "parameters": dict(trial.parameters),
+                    "score": trial.score,
+                    "summary": _backtest_summary(trial.result),
+                }
+                for trial in report.ranked
+            ],
+            "best": (
+                {
+                    "parameters": dict(report.best.parameters),
+                    "score": report.best.score,
+                    "summary": _backtest_summary(report.best.result),
+                }
+                if report.trials
+                else None
+            ),
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    def run_walk_forward(self, payload: Mapping[str, Any]) -> dict:
+        strategy_name = payload.get("strategy")
+        if not isinstance(strategy_name, str) or not strategy_name:
+            raise ValueError("strategy is required")
+        base_strategy = self.get_strategy(strategy_name)
+        if base_strategy is None:
+            raise KeyError(strategy_name)
+        parameter_grid = payload.get("parameter_grid") or {}
+        if not isinstance(parameter_grid, Mapping):
+            raise ValueError("parameter_grid must be an object")
+        total = 1
+        for axis_values in parameter_grid.values():
+            if not isinstance(axis_values, list) or not axis_values:
+                raise ValueError(
+                    "each parameter axis must be a non-empty list"
+                )
+            total *= len(axis_values)
+        if total > 64:
+            raise ValueError("parameter grid has too many combinations (max 64)")
+
+        in_sample = _parse_price_data(payload.get("in_sample_price_data"))
+        out_sample = _parse_price_data(payload.get("out_of_sample_price_data"))
+        metrics_provider, names = _parse_metrics_provider(payload.get("metrics"))
+        cfg = _parse_backtest_config(payload.get("config") or {})
+        _enforce_backtest_limits(in_sample, cfg)
+        _enforce_backtest_limits(out_sample, cfg)
+        score_fn = _SCORE_FUNCTIONS[_validated_score(payload.get("score", "sharpe"))]
+
+        factory = _make_threshold_factory(base_strategy)
+        report = self.optimizer.walk_forward(
+            strategy_factory=factory,
+            parameter_grid=parameter_grid,
+            in_sample_price_data=in_sample,
+            out_of_sample_price_data=out_sample,
+            metrics_provider=metrics_provider,
+            config=cfg,
+            score_fn=score_fn,
+            names=names,
+        )
+        return {
+            "strategy": _strategy_to_dict(base_strategy),
+            "score": getattr(score_fn, "__name__", "score"),
+            "best_parameters": dict(report.best_parameters),
+            "in_sample_best": {
+                "parameters": dict(report.in_sample.best.parameters),
+                "score": report.in_sample.best.score,
+                "summary": _backtest_summary(report.in_sample.best.result),
+            },
+            "out_of_sample": {
+                "parameters": dict(report.out_of_sample.parameters),
+                "score": report.out_of_sample.score,
+                "summary": _backtest_summary(report.out_of_sample.result),
+            },
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    # ---- Leaderboards ------------------------------------------------------
+
+    def build_leaderboards(self, params: Mapping[str, Any]) -> dict:
+        universe = str(params.get("universe", "stock")).lower()
+        if universe not in {"stock", "etf"}:
+            raise ValueError("universe must be 'stock' or 'etf'")
+        top_n = _coerce_int(params.get("top_n", 5), "top_n", lo=1, hi=20)
+        only_selected = _coerce_bool(params.get("only_selected", False))
+        if universe == "etf":
+            candidates = self.etf_aggregator.build_many()
+            strategies = [
+                record.strategy
+                for record in self.registry.list()
+                if record.strategy.name.startswith("ETF")
+                or "ETF" in record.strategy.name
+            ]
+        else:
+            candidates = self.aggregator.build_many()
+            strategies = [
+                record.strategy
+                for record in self.registry.list()
+                if "ETF" not in record.strategy.name
+            ]
+        if not strategies:
+            strategies = self.registry.list_strategies()
+        boards = self.leaderboards.build_many(
+            strategies=strategies,
+            candidates=candidates,
+            top_n=top_n,
+            only_selected=only_selected,
+            universe=universe,
+        )
+        return {
+            "universe": universe,
+            "leaderboards": [board.as_dict() for board in boards],
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
     # ---- Internal helpers --------------------------------------------------
 
     @staticmethod
-    def _apply_pool_filters(pool: StockPool, filters: dict) -> StockPool:
-        kwargs = {}
+    def _apply_stock_filters(pool: StockPool, filters: Mapping[str, Any]) -> StockPool:
+        kwargs: dict[str, Any] = {}
         for key in ("exchange", "industry", "sector"):
             value = filters.get(key)
             if value:
@@ -117,7 +451,22 @@ class APIService:
             kwargs["include_st"] = _coerce_bool(include_st)
         return pool.filter(**kwargs)
 
+    @staticmethod
+    def _apply_etf_filters(pool: ETFPool, filters: Mapping[str, Any]) -> ETFPool:
+        kwargs: dict[str, Any] = {}
+        for key in ("exchange", "asset_class", "sector", "tracking_index"):
+            value = filters.get(key)
+            if value:
+                kwargs[key] = value
+        only_tradable = filters.get("only_tradable")
+        if only_tradable is not None:
+            kwargs["only_tradable"] = _coerce_bool(only_tradable)
+        return pool.filter(**kwargs)
 
+
+# ---------------------------------------------------------------------------
+# Serializers
+# ---------------------------------------------------------------------------
 def _strategy_to_dict(strategy: StrategyProfile) -> dict:
     return {
         "name": strategy.name,
@@ -150,6 +499,20 @@ def _listing_to_dict(listing: StockListing) -> dict:
     }
 
 
+def _etf_listing_to_dict(listing: ETFListing) -> dict:
+    return {
+        "symbol": listing.symbol,
+        "name": listing.name,
+        "exchange": listing.exchange,
+        "asset_class": listing.asset_class,
+        "tracking_index": listing.tracking_index,
+        "sector": listing.sector,
+        "manager": listing.manager,
+        "inception_date": listing.inception_date,
+        "is_tradable": listing.is_tradable,
+    }
+
+
 def _result_to_dict(item) -> dict:
     return {
         "symbol": item.candidate.symbol,
@@ -162,7 +525,24 @@ def _result_to_dict(item) -> dict:
     }
 
 
-def _coerce_bool(value) -> bool:
+def _backtest_summary(result) -> dict:
+    return {
+        "total_return": result.total_return,
+        "annualized_return": result.annualized_return,
+        "annual_volatility": result.annual_volatility,
+        "sharpe_ratio": result.sharpe_ratio,
+        "max_drawdown": result.max_drawdown,
+        "win_rate": result.win_rate,
+        "turnover": result.turnover,
+        "trade_count": result.trade_count,
+        "bars": len(result.equity_curve),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Payload coercion helpers
+# ---------------------------------------------------------------------------
+def _coerce_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -170,10 +550,264 @@ def _coerce_bool(value) -> bool:
     return bool(value)
 
 
+def _coerce_int(value: Any, name: str, *, lo: int, hi: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not lo <= result <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}")
+    return result
+
+
+def _coerce_float(value: Any, name: str, *, lo: float, hi: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not lo <= result <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}")
+    return result
+
+
+def _validated_score(name: Any) -> str:
+    if name not in _SCORE_FUNCTIONS:
+        raise ValueError(
+            f"score must be one of {sorted(_SCORE_FUNCTIONS)}"
+        )
+    return str(name)
+
+
+def _parse_holdings(payload: Any) -> list[Holding]:
+    if not isinstance(payload, list):
+        raise ValueError("current holdings must be a list")
+    result: list[Holding] = []
+    for index, entry in enumerate(payload):
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"holding #{index} must be an object")
+        symbol = entry.get("symbol")
+        if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol.upper()):
+            raise ValueError(f"holding #{index}: invalid symbol")
+        try:
+            weight = float(entry.get("weight", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"holding #{index}: weight must be a number"
+            ) from exc
+        result.append(Holding(symbol=symbol.upper(), weight=weight))
+    return result
+
+
+def _parse_price_data(payload: Any) -> dict[str, list[PriceBar]]:
+    if not isinstance(payload, Mapping) or not payload:
+        raise ValueError("price_data must be a non-empty object")
+    if len(payload) > 20:
+        raise ValueError("price_data must contain at most 20 symbols")
+    result: dict[str, list[PriceBar]] = {}
+    for symbol, bars in payload.items():
+        if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol.upper()):
+            raise ValueError(f"invalid price_data symbol: {symbol!r}")
+        if not isinstance(bars, list) or not bars:
+            raise ValueError(f"price_data[{symbol}] must be a non-empty list")
+        if len(bars) > 2000:
+            raise ValueError(
+                f"price_data[{symbol}] must contain at most 2000 bars"
+            )
+        parsed: list[PriceBar] = []
+        for index, bar in enumerate(bars):
+            if not isinstance(bar, Mapping):
+                raise ValueError(
+                    f"price_data[{symbol}][{index}] must be an object"
+                )
+            date = bar.get("date")
+            if not isinstance(date, str) or not _is_valid_date(date):
+                raise ValueError(
+                    f"price_data[{symbol}][{index}]: invalid date"
+                )
+            try:
+                close = float(bar.get("close"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"price_data[{symbol}][{index}]: close must be a number"
+                ) from exc
+            tradable = _coerce_bool(bar.get("tradable", True))
+            parsed.append(PriceBar(date=date, close=close, tradable=tradable))
+        result[symbol.upper()] = parsed
+    return result
+
+
+def _parse_metrics_provider(payload: Any):
+    """Accept either a flat {symbol: metrics} or {symbol: {date: metrics}} map.
+
+    Returns ``(provider, names)`` where ``names`` is the symbol → display
+    name mapping pulled from the optional ``name`` field on each metrics
+    entry (when present).
+    """
+
+    if not isinstance(payload, Mapping) or not payload:
+        raise ValueError("metrics must be a non-empty object")
+    names: dict[str, str] = {}
+    is_time_series = _is_time_series_metrics(payload)
+    if is_time_series:
+        snapshots: dict[str, dict[str, dict[str, float]]] = {}
+        for symbol, by_date in payload.items():
+            if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol.upper()):
+                raise ValueError(f"invalid metrics symbol: {symbol!r}")
+            if not isinstance(by_date, Mapping):
+                raise ValueError(f"metrics[{symbol}] must be an object")
+            inner: dict[str, dict[str, float]] = {}
+            for date, snap in by_date.items():
+                if not _is_valid_date(date):
+                    raise ValueError(f"metrics[{symbol}]: invalid date {date!r}")
+                inner[date] = _coerce_metric_snapshot(snap, f"metrics[{symbol}][{date}]")
+            snapshots[symbol.upper()] = inner
+        provider = time_series_metrics_provider(snapshots)
+    else:
+        snapshots_flat: dict[str, dict[str, float]] = {}
+        for symbol, snap in payload.items():
+            if not isinstance(symbol, str) or not _SYMBOL_RE.fullmatch(symbol.upper()):
+                raise ValueError(f"invalid metrics symbol: {symbol!r}")
+            name = None
+            if isinstance(snap, Mapping):
+                name = snap.get("name")
+            if isinstance(name, str) and _NAME_RE.fullmatch(name):
+                names[symbol.upper()] = name
+            snapshots_flat[symbol.upper()] = _coerce_metric_snapshot(
+                snap, f"metrics[{symbol}]"
+            )
+        provider = constant_metrics_provider(snapshots_flat)
+    return provider, names
+
+
+def _is_time_series_metrics(payload: Mapping[str, Any]) -> bool:
+    """True iff every leaf is itself a mapping keyed by ISO date strings."""
+
+    for snap in payload.values():
+        if not isinstance(snap, Mapping):
+            return False
+        if not snap:
+            return False
+        for key in snap.keys():
+            if not isinstance(key, str) or not _is_valid_date(key):
+                return False
+    return True
+
+
+def _coerce_metric_snapshot(snap: Any, path: str) -> dict[str, float]:
+    if not isinstance(snap, Mapping):
+        raise ValueError(f"{path} must be an object")
+    out: dict[str, float] = {}
+    for key, value in snap.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{path}: metric name must be a non-empty string")
+        if key == "name":
+            continue  # display name, handled separately
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path}.{key} must be a number") from exc
+    return out
+
+
+def _is_valid_date(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 32:
+        return False
+    # Accept ISO-like calendar/date-time strings using a conservative pattern.
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?", value))
+
+
+def _parse_backtest_config(payload: Mapping[str, Any]) -> BacktestConfig:
+    if not isinstance(payload, Mapping):
+        raise ValueError("config must be an object")
+    kwargs: dict[str, Any] = {}
+    if "rebalance_every" in payload:
+        kwargs["rebalance_every"] = _coerce_int(
+            payload["rebalance_every"], "rebalance_every", lo=1, hi=252
+        )
+    if "transaction_cost" in payload:
+        kwargs["transaction_cost"] = _coerce_float(
+            payload["transaction_cost"], "transaction_cost", lo=0.0, hi=0.5
+        )
+    if "top_n" in payload:
+        kwargs["top_n"] = _coerce_int(payload["top_n"], "top_n", lo=1, hi=50)
+    if "initial_capital" in payload:
+        kwargs["initial_capital"] = _coerce_float(
+            payload["initial_capital"],
+            "initial_capital",
+            lo=1.0,
+            hi=1e12,
+        )
+    if "risk_free_rate" in payload:
+        kwargs["risk_free_rate"] = _coerce_float(
+            payload["risk_free_rate"], "risk_free_rate", lo=-1.0, hi=1.0
+        )
+    if "periods_per_year" in payload:
+        kwargs["periods_per_year"] = _coerce_int(
+            payload["periods_per_year"], "periods_per_year", lo=1, hi=400
+        )
+    return BacktestConfig(**kwargs)
+
+
+def _enforce_backtest_limits(
+    price_data: Mapping[str, Sequence[PriceBar]], cfg: BacktestConfig
+) -> None:
+    # Total bars across symbols × top_n bounds the engine cost.
+    total_bars = sum(len(bars) for bars in price_data.values())
+    if total_bars > 5000:
+        raise ValueError("backtest workload exceeds limit (max 5000 total bars)")
+
+
+def _make_threshold_factory(base: StrategyProfile):
+    """Build a strategy factory that overrides rule thresholds by metric.
+
+    The optimization endpoint exposes a constrained search over per-metric
+    thresholds for the supplied template — this keeps the public surface
+    safe (callers cannot inject arbitrary rules) while still satisfying
+    PRD §4.2 V1.0 参数优化 / 样本外验证 requirements.
+    """
+
+    def factory(params: Mapping[str, Any]) -> StrategyProfile:
+        new_rules = []
+        for rule in base.rules:
+            if rule.metric in params:
+                try:
+                    threshold = float(params[rule.metric])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"parameter {rule.metric!r} must be a number"
+                    ) from exc
+                new_rules.append(
+                    type(rule)(
+                        metric=rule.metric,
+                        operator=rule.operator,
+                        threshold=threshold,
+                        weight=rule.weight,
+                        required=rule.required,
+                        description=rule.description,
+                    )
+                )
+            else:
+                new_rules.append(rule)
+        return StrategyProfile(
+            name=base.name,
+            rules=tuple(new_rules),
+            combine_mode=base.combine_mode,
+            min_score=base.min_score,
+        )
+
+    return factory
+
+
+# ---------------------------------------------------------------------------
+# Static assets
+# ---------------------------------------------------------------------------
 _STATIC_ASSETS: dict[str, Path] = {
     "index.html": WEB_ROOT / "index.html",
     "app.js": WEB_ROOT / "app.js",
     "styles.css": WEB_ROOT / "styles.css",
+    "desktop.html": WEB_ROOT / "desktop.html",
+    "desktop.js": WEB_ROOT / "desktop.js",
+    "desktop.css": WEB_ROOT / "desktop.css",
 }
 
 
@@ -185,14 +819,19 @@ def _safe_static_path(rel_path: str) -> Path | None:
     """
 
     rel = rel_path.lstrip("/") or "index.html"
+    if rel == "desktop":
+        rel = "desktop.html"
     return _STATIC_ASSETS.get(rel)
 
 
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
 class APIRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler exposing JSON endpoints and the static UI."""
 
     service: APIService | None = None  # injected by ``run`` / tests
-    server_version = "AStockPromotionMVP/1.0"
+    server_version = "AStockPromotion/1.0"
 
     # Disable noisy default logging unless explicitly enabled.
     def log_message(self, format: str, *args) -> None:  # noqa: A002
@@ -212,10 +851,27 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"status": "ok"})
                 return
             if path == "/api/strategies":
-                self._send_json(HTTPStatus.OK, {"strategies": self.service.list_strategies()})
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"strategies": self.service.list_strategies()},
+                )
+                return
+            if path == "/api/admin/strategies":
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"strategies": self.service.list_strategy_records()},
+                )
                 return
             if path == "/api/stocks":
                 self._send_json(HTTPStatus.OK, {"stocks": self.service.list_stocks(query)})
+                return
+            if path == "/api/etfs":
+                self._send_json(HTTPStatus.OK, {"etfs": self.service.list_etfs(query)})
+                return
+            if path == "/api/leaderboards":
+                self._send_json(
+                    HTTPStatus.OK, self.service.build_leaderboards(query)
+                )
                 return
             stock_match = re.fullmatch(r"/api/stocks/([A-Za-z0-9]+)", path)
             if stock_match:
@@ -229,8 +885,22 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(HTTPStatus.OK, detail)
                 return
-            # Fall back to static file serving for the SPA.
+            etf_match = re.fullmatch(r"/api/etfs/([A-Za-z0-9]+)", path)
+            if etf_match:
+                symbol = etf_match.group(1).upper()
+                if not _SYMBOL_RE.fullmatch(symbol):
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid symbol"})
+                    return
+                detail = self.service.get_etf_detail(symbol)
+                if detail is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "etf not found"})
+                    return
+                self._send_json(HTTPStatus.OK, detail)
+                return
+            # Fall back to static file serving for the SPAs.
             self._serve_static(url.path)
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:  # pragma: no cover - defensive
             logger.exception("unhandled GET error for %s", self.path)
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
@@ -242,31 +912,125 @@ class APIRequestHandler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         path = url.path.rstrip("/") or "/"
         try:
+            payload = self._read_json() if self.headers.get("Content-Length") else {}
             if path == "/api/select":
-                payload = self._read_json()
-                strategy_name = payload.get("strategy")
-                if not strategy_name or not isinstance(strategy_name, str):
-                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "strategy is required"})
-                    return
-                filters = payload.get("filters") or {}
-                if not isinstance(filters, dict):
-                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "filters must be an object"})
-                    return
+                self._handle_selection(payload, etf=False)
+                return
+            if path == "/api/etfs/select":
+                self._handle_selection(payload, etf=True)
+                return
+            if path == "/api/portfolio/rebalance":
+                self._send_json(HTTPStatus.OK, self.service.run_rebalance(payload))
+                return
+            if path == "/api/backtest/run":
+                self._send_json(HTTPStatus.OK, self.service.run_backtest(payload))
+                return
+            if path == "/api/backtest/optimize":
+                self._send_json(HTTPStatus.OK, self.service.run_optimization(payload))
+                return
+            if path == "/api/backtest/walk-forward":
+                self._send_json(HTTPStatus.OK, self.service.run_walk_forward(payload))
+                return
+            if path == "/api/admin/strategies":
                 try:
-                    result = self.service.run_selection(strategy_name, filters)
-                except KeyError:
-                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "strategy not found"})
+                    record = self.service.registry.create(payload)
+                except StrategyRegistryError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                     return
-                self._send_json(HTTPStatus.OK, result)
+                self._send_json(HTTPStatus.CREATED, {"strategy": record.as_dict()})
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except KeyError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "strategy not found"})
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:  # pragma: no cover - defensive
             logger.exception("unhandled POST error for %s", self.path)
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
 
+    def do_PUT(self) -> None:  # noqa: N802
+        if self.service is None:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "service not configured"})
+            return
+        url = urlsplit(self.path)
+        path = url.path.rstrip("/") or "/"
+        try:
+            payload = self._read_json() if self.headers.get("Content-Length") else {}
+            admin_match = re.fullmatch(
+                r"/api/admin/strategies/([^/]+)", path
+            )
+            if admin_match:
+                name = _decode_path_segment(admin_match.group(1))
+                try:
+                    record = self.service.registry.update(name, payload)
+                except StrategyRegistryError as exc:
+                    msg = str(exc)
+                    if "not found" in msg:
+                        self._send_json(HTTPStatus.NOT_FOUND, {"error": msg})
+                    elif "read-only" in msg:
+                        self._send_json(HTTPStatus.FORBIDDEN, {"error": msg})
+                    else:
+                        self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+                    return
+                self._send_json(HTTPStatus.OK, {"strategy": record.as_dict()})
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("unhandled PUT error for %s", self.path)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if self.service is None:
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "service not configured"})
+            return
+        url = urlsplit(self.path)
+        path = url.path.rstrip("/") or "/"
+        try:
+            admin_match = re.fullmatch(
+                r"/api/admin/strategies/([^/]+)", path
+            )
+            if admin_match:
+                name = _decode_path_segment(admin_match.group(1))
+                try:
+                    self.service.registry.delete(name)
+                except StrategyRegistryError as exc:
+                    msg = str(exc)
+                    if "not found" in msg:
+                        self._send_json(HTTPStatus.NOT_FOUND, {"error": msg})
+                    elif "read-only" in msg:
+                        self._send_json(HTTPStatus.FORBIDDEN, {"error": msg})
+                    else:
+                        self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+                    return
+                self._send_json(HTTPStatus.OK, {"status": "deleted", "name": name})
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("unhandled DELETE error for %s", self.path)
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
+
     # ---- Helpers -----------------------------------------------------------
+
+    def _handle_selection(self, payload: Mapping[str, Any], *, etf: bool) -> None:
+        strategy_name = payload.get("strategy")
+        if not strategy_name or not isinstance(strategy_name, str):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "strategy is required"})
+            return
+        filters = payload.get("filters") or {}
+        if not isinstance(filters, dict):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "filters must be an object"})
+            return
+        try:
+            if etf:
+                result = self.service.run_etf_selection(strategy_name, filters)
+            else:
+                result = self.service.run_selection(strategy_name, filters)
+        except KeyError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "strategy not found"})
+            return
+        self._send_json(HTTPStatus.OK, result)
 
     def _read_json(self) -> dict:
         length_header = self.headers.get("Content-Length")
@@ -274,8 +1038,8 @@ class APIRequestHandler(BaseHTTPRequestHandler):
             length = int(length_header or "0")
         except ValueError as exc:
             raise ValueError("invalid Content-Length header") from exc
-        # Cap payload at 64KB; strategy requests are tiny.
-        if length < 0 or length > 64 * 1024:
+        # Cap payload at 512KB; backtest requests carry price/metric arrays.
+        if length < 0 or length > 512 * 1024:
             raise ValueError("payload too large")
         body = self.rfile.read(length) if length else b""
         if not body:
@@ -325,6 +1089,15 @@ def _content_type_for(path: Path) -> str:
         ".png": "image/png",
         ".ico": "image/x-icon",
     }.get(suffix, "application/octet-stream")
+
+
+def _decode_path_segment(raw: str) -> str:
+    from urllib.parse import unquote
+
+    value = unquote(raw)
+    if not value or len(value) > 64 or any(ord(ch) < 0x20 for ch in value):
+        raise ValueError("invalid strategy name")
+    return value
 
 
 def build_handler(service: APIService) -> type[APIRequestHandler]:

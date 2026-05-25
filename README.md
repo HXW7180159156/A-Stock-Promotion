@@ -8,10 +8,13 @@ A cross-platform A股智能选股APP project blueprint and MVP strategy engine.
 - [代码实现方案](docs/IMPLEMENTATION_PLAN.md)
 - [测试计划](docs/TEST_PLAN.md)
 
-## MVP strategy engine
-The current implementation provides a pure-Python, dependency-free MVP that
-covers PRD §4.1 end to end: stock pool, technical indicators, fundamentals,
-sentiment factors, multi-rule scoring, REST API and a mobile-friendly Web UI.
+## MVP + V1.0 strategy engine
+The current implementation covers PRD §4.1 (MVP) **and §4.2 (V1.0)** end to
+end as a pure-Python, dependency-free service: stock pool, ETF pool,
+technical indicators, fundamentals, sentiment factors, multi-rule scoring,
+portfolio rebalancing, backtesting / parameter optimisation / walk-forward
+validation, operational leaderboards, an admin strategy registry, REST API,
+plus a mobile-friendly Web UI and a desktop / admin Web UI.
 
 ```bash
 # Run the full test suite
@@ -21,9 +24,12 @@ python -m unittest discover -s tests
 PYTHONPATH=src python -m a_stock_promotion.api
 ```
 
-The Web UI ships the four MVP screens — strategy configuration, screening
-results, stock detail and the regulatory risk disclosure banner — and is
-responsive for both mobile and desktop browsers.
+Two SPAs are bundled:
+
+* `/`        — mobile-friendly screening UI (MVP).
+* `/desktop` — desktop / admin UI (V1.0): ETF screening & detail,
+  portfolio rebalance, backtest & parameter optimisation, operational
+  leaderboards, and strategy management.
 
 ## Compliance note
 This project is for investment research tooling only. It does not provide

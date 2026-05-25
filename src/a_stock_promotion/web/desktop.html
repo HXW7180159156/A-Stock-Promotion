@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>A股智能选股 · 桌面/管理端 V1.0</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/desktop.css">
+</head>
+<body class="desktop">
+  <header class="topbar desktop-topbar">
+    <h1>A股智能选股 · 桌面/管理端</h1>
+    <span class="badge">V1.0</span>
+    <a class="topbar-link" href="/">移动端</a>
+  </header>
+
+  <div class="risk-banner" role="note">
+    本服务仅用于投资研究，不构成投资建议或收益承诺，投资有风险，入市需谨慎。
+  </div>
+
+  <nav class="tabs desktop-tabs" role="tablist">
+    <button class="tab is-active" data-tab="etf" role="tab">ETF 筛选 / 详情</button>
+    <button class="tab" data-tab="portfolio" role="tab">组合再平衡</button>
+    <button class="tab" data-tab="backtest" role="tab">回测 / 参数优化</button>
+    <button class="tab" data-tab="leaderboard" role="tab">运营榜单</button>
+    <button class="tab" data-tab="admin" role="tab">策略管理</button>
+  </nav>
+
+  <main class="desktop-main">
+    <!-- ETF 筛选 -->
+    <section class="panel is-active" data-panel="etf">
+      <div class="grid two">
+        <div class="card">
+          <h2>ETF 筛选</h2>
+          <label class="field">
+            <span>策略模板</span>
+            <select id="etf-strategy"></select>
+          </label>
+          <div class="field-row">
+            <label class="field"><span>交易所</span>
+              <select id="etf-exchange">
+                <option value="">不限</option>
+                <option value="SH">上交所</option>
+                <option value="SZ">深交所</option>
+              </select>
+            </label>
+            <label class="field"><span>大类资产</span>
+              <select id="etf-asset"><option value="">不限</option></select>
+            </label>
+          </div>
+          <button class="primary" id="etf-run">运行 ETF 筛选</button>
+          <p class="muted" id="etf-summary">尚未运行筛选。</p>
+          <ul class="result-list" id="etf-results"></ul>
+        </div>
+        <div class="card">
+          <h2>ETF 详情</h2>
+          <p class="muted" id="etf-detail-placeholder">从左侧结果中选择一只 ETF。</p>
+          <article id="etf-detail-card" hidden>
+            <header>
+              <h3 id="etf-detail-title"></h3>
+              <p class="muted" id="etf-detail-subtitle"></p>
+            </header>
+            <table class="metrics-table" id="etf-detail-metrics"></table>
+            <p class="risk-note" id="etf-detail-risk"></p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 组合再平衡 -->
+    <section class="panel" data-panel="portfolio">
+      <div class="grid two">
+        <div class="card">
+          <h2>组合配置</h2>
+          <label class="field"><span>策略模板</span>
+            <select id="pf-strategy"></select>
+          </label>
+          <div class="field-row">
+            <label class="field"><span>标的范围</span>
+              <select id="pf-universe">
+                <option value="etf">ETF</option>
+                <option value="stock">股票</option>
+              </select>
+            </label>
+            <label class="field"><span>权重方案</span>
+              <select id="pf-scheme">
+                <option value="equal">等权</option>
+                <option value="score">评分加权</option>
+              </select>
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field"><span>持仓数</span>
+              <input id="pf-topn" type="number" min="1" max="20" value="5">
+            </label>
+            <label class="field"><span>单标的上限</span>
+              <input id="pf-cap" type="number" step="0.05" min="0.05" max="1" value="0.4">
+            </label>
+            <label class="field"><span>交易费率</span>
+              <input id="pf-fee" type="number" step="0.0005" min="0" max="0.05" value="0.001">
+            </label>
+          </div>
+          <label class="field"><span>当前持仓 (JSON 数组, 可选)</span>
+            <textarea id="pf-current" rows="4" placeholder='[{"symbol":"510300","weight":0.5}]'></textarea>
+          </label>
+          <button class="primary" id="pf-run">生成再平衡计划</button>
+        </div>
+        <div class="card">
+          <h2>再平衡计划</h2>
+          <p class="muted" id="pf-summary">尚未生成计划。</p>
+          <table class="data-table" id="pf-table" hidden>
+            <thead>
+              <tr><th>标的</th><th>操作</th><th>当前权重</th><th>目标权重</th><th>变化</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p class="muted" id="pf-notes"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 回测 -->
+    <section class="panel" data-panel="backtest">
+      <div class="grid two">
+        <div class="card">
+          <h2>回测 / 参数优化配置</h2>
+          <label class="field"><span>策略模板</span>
+            <select id="bt-strategy"></select>
+          </label>
+          <div class="field-row">
+            <label class="field"><span>调仓频率(交易日)</span>
+              <input id="bt-rebalance" type="number" min="1" max="60" value="5">
+            </label>
+            <label class="field"><span>持仓数</span>
+              <input id="bt-topn" type="number" min="1" max="20" value="3">
+            </label>
+            <label class="field"><span>单边费率</span>
+              <input id="bt-fee" type="number" step="0.0005" min="0" max="0.05" value="0.001">
+            </label>
+          </div>
+          <p class="muted">使用样例 ETF 价格序列与因子快照进行演示回测。</p>
+          <div class="button-row">
+            <button class="primary" id="bt-run">执行历史回测</button>
+            <button class="secondary" id="bt-opt">参数网格优化</button>
+            <button class="secondary" id="bt-wf">样本外验证</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>结果摘要</h2>
+          <p class="muted" id="bt-summary">尚未执行回测。</p>
+          <table class="data-table" id="bt-table" hidden>
+            <thead><tr><th>指标</th><th>数值</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <h3 id="bt-trials-title" hidden>参数试验结果</h3>
+          <table class="data-table" id="bt-trials" hidden>
+            <thead><tr><th>参数</th><th>得分</th><th>年化</th><th>回撤</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 运营榜单 -->
+    <section class="panel" data-panel="leaderboard">
+      <div class="card">
+        <h2>运营榜单</h2>
+        <div class="field-row">
+          <label class="field"><span>榜单范围</span>
+            <select id="lb-universe">
+              <option value="stock">股票</option>
+              <option value="etf">ETF</option>
+            </select>
+          </label>
+          <label class="field"><span>每榜 Top</span>
+            <input id="lb-topn" type="number" min="1" max="20" value="5">
+          </label>
+          <label class="check"><input type="checkbox" id="lb-selected"><span>仅展示命中标的</span></label>
+        </div>
+        <button class="primary" id="lb-run">生成榜单</button>
+        <div id="lb-results" class="leaderboards"></div>
+      </div>
+    </section>
+
+    <!-- 策略管理 -->
+    <section class="panel" data-panel="admin">
+      <div class="grid two">
+        <div class="card">
+          <h2>策略目录</h2>
+          <button class="secondary" id="admin-refresh">刷新</button>
+          <ul class="strategy-list" id="admin-list"></ul>
+        </div>
+        <div class="card">
+          <h2>策略编辑</h2>
+          <p class="muted">内置策略只读；新建或编辑自定义策略后保存。</p>
+          <label class="field"><span>名称</span>
+            <input id="admin-name" type="text" maxlength="64" placeholder="自定义策略名">
+          </label>
+          <div class="field-row">
+            <label class="field"><span>组合模式</span>
+              <select id="admin-mode">
+                <option value="and">AND</option>
+                <option value="or">OR</option>
+              </select>
+            </label>
+            <label class="field"><span>最低评分</span>
+              <input id="admin-minscore" type="number" min="0" max="1" step="0.05" value="0">
+            </label>
+          </div>
+          <label class="field"><span>规则 (JSON 数组)</span>
+            <textarea id="admin-rules" rows="10" placeholder='[{"metric":"roe","operator":">=","threshold":15,"weight":1,"required":true,"description":"ROE≥15%"}]'></textarea>
+          </label>
+          <div class="button-row">
+            <button class="primary" id="admin-save">保存</button>
+            <button class="secondary" id="admin-new">清空表单</button>
+            <button class="danger" id="admin-delete">删除选中</button>
+          </div>
+          <p class="muted" id="admin-status"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">A股智能选股 · 桌面/管理端 V1.0 · 演示数据仅供研究</footer>
+  <script src="/desktop.js"></script>
+</body>
+</html>

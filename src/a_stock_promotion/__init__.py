@@ -1,5 +1,6 @@
 """A-Stock Promotion MVP strategy engine."""
 
+from .admin import StrategyRecord, StrategyRegistry, StrategyRegistryError
 from .backtesting import (
     BacktestConfig,
     BacktestEngine,
@@ -18,6 +19,15 @@ from .data_sources import (
     SentimentProvider,
     SentimentSnapshot,
 )
+from .etf_pool import (
+    ETFFeatureAggregator,
+    ETFListing,
+    ETFPool,
+    ETFProvider,
+    ETFSnapshot,
+    SampleETFProvider,
+    sample_etf_pool,
+)
 from .features import FeatureAggregator, PriceHistory, compute_technical_metrics
 from .indicators import (
     BollingerPoint,
@@ -32,6 +42,7 @@ from .indicators import (
     simple_moving_average,
     volume_ratio,
 )
+from .leaderboards import Leaderboard, LeaderboardBuilder, LeaderboardEntry
 from .models import SelectionResult, StockMetrics, StrategyProfile, StrategyRule
 from .optimization import (
     GridSearchOptimizer,
@@ -42,6 +53,14 @@ from .optimization import (
     score_calmar,
     score_sharpe,
     score_total_return,
+)
+from .portfolio import (
+    Holding,
+    RebalancePlan,
+    RebalanceTrade,
+    build_rebalance_plan,
+    compute_target_weights,
+    plan_from_selection,
 )
 from .risk_metrics import (
     historical_var,
@@ -63,17 +82,29 @@ __all__ = [
     "BacktestEngine",
     "BacktestResult",
     "BollingerPoint",
+    "ETFFeatureAggregator",
+    "ETFListing",
+    "ETFPool",
+    "ETFProvider",
+    "ETFSnapshot",
     "FeatureAggregator",
     "FundamentalProvider",
     "FundamentalSnapshot",
     "GridSearchOptimizer",
+    "Holding",
     "KDJPoint",
+    "Leaderboard",
+    "LeaderboardBuilder",
+    "LeaderboardEntry",
     "MACDPoint",
     "OptimizationReport",
     "OptimizationTrial",
     "PriceBar",
     "PriceHistory",
     "RebalanceEvent",
+    "RebalancePlan",
+    "RebalanceTrade",
+    "SampleETFProvider",
     "SampleFundamentalProvider",
     "SampleSentimentProvider",
     "SelectionEngine",
@@ -84,9 +115,14 @@ __all__ = [
     "StockMetrics",
     "StockPool",
     "StrategyProfile",
+    "StrategyRecord",
+    "StrategyRegistry",
+    "StrategyRegistryError",
     "StrategyRule",
     "WalkForwardReport",
     "bollinger_bands",
+    "build_rebalance_plan",
+    "compute_target_weights",
     "compute_technical_metrics",
     "constant_metrics_provider",
     "default_etf_strategy",
@@ -99,7 +135,9 @@ __all__ = [
     "ma_trend_score",
     "macd",
     "max_drawdown",
+    "plan_from_selection",
     "relative_strength_index",
+    "sample_etf_pool",
     "sample_stock_pool",
     "score_calmar",
     "score_sharpe",
