@@ -33,6 +33,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from .admin import StrategyRegistry, StrategyRegistryError
+from .ai_assistant import (
+    AIAssistantError,
+    explain_strategy,
+    parse_prompt,
+    summarize_results,
+)
+from .community import CommunityError, CommunityHub
+from .membership import MembershipError, MembershipService
 from .backtesting import (
     BacktestConfig,
     BacktestEngine,
@@ -82,6 +90,8 @@ class APIService:
         strategies: Iterable[StrategyProfile] | None = None,
         etf_aggregator: ETFFeatureAggregator | None = None,
         registry: StrategyRegistry | None = None,
+        community: CommunityHub | None = None,
+        membership: MembershipService | None = None,
     ) -> None:
         self.aggregator = aggregator or FeatureAggregator(
             pool=sample_stock_pool(),
@@ -94,6 +104,8 @@ class APIService:
         self.registry = registry or StrategyRegistry(
             builtin_strategies=list(strategies) if strategies is not None else None,
         )
+        self.community = community or CommunityHub()
+        self.membership = membership or MembershipService()
         self.engine = SelectionEngine()
         self.backtest_engine = BacktestEngine(self.engine)
         self.optimizer = GridSearchOptimizer(self.backtest_engine)
@@ -433,6 +445,248 @@ class APIService:
             "leaderboards": [board.as_dict() for board in boards],
             "risk_disclosure": RISK_DISCLOSURE,
         }
+
+    # ---- AI assistant (V2.0) ----------------------------------------------
+
+    def ai_parse_prompt(self, payload: Mapping[str, Any]) -> dict:
+        prompt = payload.get("prompt")
+        name = payload.get("name")
+        default_combine = str(payload.get("default_combine", "and"))
+        username = payload.get("username")
+        if username is not None and not self.membership.can_use_ai_assistant(
+            str(username)
+        ):
+            raise PermissionError("AI 助手不可用，请升级会员")
+        result = parse_prompt(
+            prompt if isinstance(prompt, str) else "",
+            name=name if isinstance(name, str) else None,
+            default_combine=default_combine,
+        )
+        return {
+            **result.as_dict(),
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    def ai_explain_strategy(self, name: str) -> dict:
+        strategy = self.get_strategy(name)
+        if strategy is None:
+            raise KeyError(name)
+        return {
+            "strategy": _strategy_to_dict(strategy),
+            "explanation": explain_strategy(strategy),
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    def ai_summarize_selection(self, payload: Mapping[str, Any]) -> dict:
+        strategy_name = payload.get("strategy")
+        if not isinstance(strategy_name, str) or not strategy_name:
+            raise ValueError("strategy is required")
+        strategy = self.get_strategy(strategy_name)
+        if strategy is None:
+            raise KeyError(strategy_name)
+        universe = str(payload.get("universe", "stock")).lower()
+        if universe not in {"stock", "etf"}:
+            raise ValueError("universe must be 'stock' or 'etf'")
+        filters = payload.get("filters") or {}
+        if not isinstance(filters, Mapping):
+            raise ValueError("filters must be an object")
+        top_n = _coerce_int(payload.get("top_n", 5), "top_n", lo=1, hi=20)
+        if universe == "etf":
+            pool = self._apply_etf_filters(self.etf_aggregator.pool, filters)
+            candidates = self.etf_aggregator.build_many(list(pool))
+        else:
+            pool = self._apply_stock_filters(self.aggregator.pool, filters)
+            candidates = self.aggregator.build_many(list(pool))
+        ranked = self.engine.rank(candidates, strategy)
+        summary = summarize_results(ranked, top_n=top_n)
+        return {
+            "strategy": _strategy_to_dict(strategy),
+            "universe": universe,
+            "summary": summary,
+            "results": [_result_to_dict(item) for item in ranked[:top_n]],
+            "risk_disclosure": RISK_DISCLOSURE,
+        }
+
+    # ---- Community (V2.0) -------------------------------------------------
+
+    def community_list(self, query: Mapping[str, Any]) -> dict:
+        owner = query.get("owner") if query.get("owner") else None
+        tag = query.get("tag") if query.get("tag") else None
+        only_free = _coerce_bool(query.get("only_free", False))
+        shares = self.community.list_shares(
+            owner=str(owner) if owner else None,
+            tag=str(tag) if tag else None,
+            only_free=only_free,
+        )
+        return {"shares": [item.as_dict() for item in shares]}
+
+    def community_publish(self, payload: Mapping[str, Any]) -> dict:
+        slug = payload.get("slug")
+        owner = payload.get("owner")
+        description = payload.get("description", "")
+        tags = payload.get("tags") or []
+        price = payload.get("price", 0.0)
+        strategy_payload = payload.get("strategy")
+        if strategy_payload is None:
+            raise ValueError("strategy is required")
+        # Reuse admin validation so the API surface is uniform.
+        from .admin import _strategy_from_payload  # local import to avoid cycle
+
+        try:
+            try:
+                price_value = float(price)
+            except (TypeError, ValueError) as exc:
+                raise CommunityError("price must be a number") from exc
+            if price_value > 0 and isinstance(owner, str):
+                user = self.membership.get_user(owner)
+                if user is None or not self.membership.get_benefits(
+                    user.tier
+                ).can_publish_paid_strategy:
+                    raise PermissionError(
+                        "只有 Pro/VIP 会员可以发布付费策略"
+                    )
+            try:
+                strategy = _strategy_from_payload(strategy_payload)
+            except StrategyRegistryError as exc:
+                raise CommunityError(str(exc)) from exc
+            record = self.community.publish(
+                slug=str(slug) if slug is not None else "",
+                owner=str(owner) if owner is not None else "",
+                strategy=strategy,
+                description=str(description) if description else "",
+                tags=tags,
+                price=price_value,
+            )
+        except CommunityError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"share": record.as_dict()}
+
+    def community_get(self, slug: str) -> dict | None:
+        record = self.community.get_share(slug)
+        if record is None:
+            return None
+        comments = self.community.list_comments(slug)
+        return {
+            "share": record.as_dict(),
+            "comments": [comment.as_dict() for comment in comments],
+        }
+
+    def community_subscribe(self, slug: str, payload: Mapping[str, Any]) -> dict:
+        user = payload.get("username")
+        if not isinstance(user, str):
+            raise ValueError("username is required")
+        record = self.community.get_share(slug)
+        if record is None:
+            raise KeyError(slug)
+        if record.is_paid and not self.membership.has_purchased(user, slug):
+            raise PermissionError("付费策略需先在策略市场购买")
+        try:
+            updated = self.community.subscribe(slug, user)
+        except CommunityError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"share": updated.as_dict()}
+
+    def community_unsubscribe(self, slug: str, payload: Mapping[str, Any]) -> dict:
+        user = payload.get("username")
+        if not isinstance(user, str):
+            raise ValueError("username is required")
+        try:
+            updated = self.community.unsubscribe(slug, user)
+        except CommunityError as exc:
+            if "not found" in str(exc):
+                raise KeyError(slug) from exc
+            raise ValueError(str(exc)) from exc
+        return {"share": updated.as_dict()}
+
+    def community_comment(self, slug: str, payload: Mapping[str, Any]) -> dict:
+        author = payload.get("author")
+        body = payload.get("body")
+        if not isinstance(author, str):
+            raise ValueError("author is required")
+        if not isinstance(body, str):
+            raise ValueError("body is required")
+        record = self.community.get_share(slug)
+        if record is None:
+            raise KeyError(slug)
+        if record.is_paid and not (
+            self.membership.has_purchased(author, slug)
+            or record.owner == author
+        ):
+            raise PermissionError("仅订阅或购买后可评论付费策略")
+        try:
+            comment = self.community.add_comment(slug, author=author, body=body)
+        except CommunityError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"comment": comment.as_dict()}
+
+    # ---- Membership (V2.0) ------------------------------------------------
+
+    def membership_benefits(self) -> dict:
+        return {
+            "tiers": [item.as_dict() for item in self.membership.list_benefits()],
+        }
+
+    def membership_upsert_user(self, payload: Mapping[str, Any]) -> dict:
+        username = payload.get("username")
+        tier = payload.get("tier")
+        if not isinstance(username, str):
+            raise ValueError("username is required")
+        if not isinstance(tier, str):
+            raise ValueError("tier is required")
+        try:
+            user = self.membership.upsert_user(username, tier)  # type: ignore[arg-type]
+        except MembershipError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"user": user.as_dict()}
+
+    def membership_get_user(self, username: str) -> dict | None:
+        user = self.membership.get_user(username)
+        if user is None:
+            return None
+        orders = self.membership.list_orders(username)
+        return {
+            "user": user.as_dict(),
+            "orders": [order.as_dict() for order in orders],
+        }
+
+    def membership_subscribe_addon(self, payload: Mapping[str, Any]) -> dict:
+        username = payload.get("username")
+        addon = payload.get("addon")
+        if not isinstance(username, str):
+            raise ValueError("username is required")
+        if not isinstance(addon, str):
+            raise ValueError("addon is required")
+        try:
+            user = self.membership.subscribe_addon(username, addon)
+        except MembershipError as exc:
+            msg = str(exc)
+            if "not found" in msg:
+                raise KeyError(username) from exc
+            raise ValueError(msg) from exc
+        return {"user": user.as_dict()}
+
+    def marketplace_purchase(self, payload: Mapping[str, Any]) -> dict:
+        username = payload.get("username")
+        slug = payload.get("slug")
+        if not isinstance(username, str):
+            raise ValueError("username is required")
+        if not isinstance(slug, str):
+            raise ValueError("slug is required")
+        share = self.community.get_share(slug)
+        if share is None:
+            raise KeyError(slug)
+        if not share.is_paid:
+            raise ValueError("strategy is free; no purchase required")
+        try:
+            order = self.membership.purchase(
+                username=username, slug=slug, list_price=share.price
+            )
+        except MembershipError as exc:
+            msg = str(exc)
+            if "not found" in msg:
+                raise KeyError(username) from exc
+            raise ValueError(msg) from exc
+        return {"order": order.as_dict(), "share": share.as_dict()}
 
     # ---- Internal helpers --------------------------------------------------
 
@@ -873,6 +1127,54 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK, self.service.build_leaderboards(query)
                 )
                 return
+            if path == "/api/membership/benefits":
+                self._send_json(HTTPStatus.OK, self.service.membership_benefits())
+                return
+            if path == "/api/community/shares":
+                self._send_json(
+                    HTTPStatus.OK, self.service.community_list(query)
+                )
+                return
+            membership_user_match = re.fullmatch(
+                r"/api/membership/users/([A-Za-z0-9_\-]{2,32})", path
+            )
+            if membership_user_match:
+                username = membership_user_match.group(1)
+                detail = self.service.membership_get_user(username)
+                if detail is None:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND, {"error": "user not found"}
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, detail)
+                return
+            community_get_match = re.fullmatch(
+                r"/api/community/shares/([A-Za-z0-9_\-]{2,64})", path
+            )
+            if community_get_match:
+                slug = community_get_match.group(1)
+                detail = self.service.community_get(slug)
+                if detail is None:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND, {"error": "share not found"}
+                    )
+                    return
+                self._send_json(HTTPStatus.OK, detail)
+                return
+            ai_explain_match = re.fullmatch(
+                r"/api/ai/strategies/([^/]+)/explain", path
+            )
+            if ai_explain_match:
+                name = _decode_path_segment(ai_explain_match.group(1))
+                try:
+                    self._send_json(
+                        HTTPStatus.OK, self.service.ai_explain_strategy(name)
+                    )
+                except KeyError:
+                    self._send_json(
+                        HTTPStatus.NOT_FOUND, {"error": "strategy not found"}
+                    )
+                return
             stock_match = re.fullmatch(r"/api/stocks/([A-Za-z0-9]+)", path)
             if stock_match:
                 symbol = stock_match.group(1).upper()
@@ -939,9 +1241,77 @@ class APIRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(HTTPStatus.CREATED, {"strategy": record.as_dict()})
                 return
+            if path == "/api/ai/parse":
+                try:
+                    self._send_json(
+                        HTTPStatus.OK, self.service.ai_parse_prompt(payload)
+                    )
+                except AIAssistantError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            if path == "/api/ai/summarize":
+                self._send_json(
+                    HTTPStatus.OK, self.service.ai_summarize_selection(payload)
+                )
+                return
+            if path == "/api/community/shares":
+                try:
+                    result = self.service.community_publish(payload)
+                except CommunityError as exc:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                    return
+                self._send_json(HTTPStatus.CREATED, result)
+                return
+            community_sub_match = re.fullmatch(
+                r"/api/community/shares/([A-Za-z0-9_\-]{2,64})/subscribe", path
+            )
+            if community_sub_match:
+                slug = community_sub_match.group(1)
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.service.community_subscribe(slug, payload),
+                )
+                return
+            community_unsub_match = re.fullmatch(
+                r"/api/community/shares/([A-Za-z0-9_\-]{2,64})/unsubscribe", path
+            )
+            if community_unsub_match:
+                slug = community_unsub_match.group(1)
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.service.community_unsubscribe(slug, payload),
+                )
+                return
+            community_comment_match = re.fullmatch(
+                r"/api/community/shares/([A-Za-z0-9_\-]{2,64})/comments", path
+            )
+            if community_comment_match:
+                slug = community_comment_match.group(1)
+                result = self.service.community_comment(slug, payload)
+                self._send_json(HTTPStatus.CREATED, result)
+                return
+            if path == "/api/membership/users":
+                self._send_json(
+                    HTTPStatus.OK, self.service.membership_upsert_user(payload)
+                )
+                return
+            if path == "/api/membership/addons":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.service.membership_subscribe_addon(payload),
+                )
+                return
+            if path == "/api/marketplace/purchase":
+                self._send_json(
+                    HTTPStatus.CREATED,
+                    self.service.marketplace_purchase(payload),
+                )
+                return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except KeyError:
-            self._send_json(HTTPStatus.NOT_FOUND, {"error": "strategy not found"})
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except PermissionError as exc:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
         except ValueError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception:  # pragma: no cover - defensive

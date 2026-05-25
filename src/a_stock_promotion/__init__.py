@@ -1,6 +1,22 @@
 """A-Stock Promotion MVP strategy engine."""
 
 from .admin import StrategyRecord, StrategyRegistry, StrategyRegistryError
+from .ai_assistant import (
+    AIAssistantError,
+    AIParseResult,
+    explain_strategy,
+    parse_prompt,
+    summarize_results,
+)
+from .community import Comment, CommunityError, CommunityHub, SharedStrategy
+from .membership import (
+    DEFAULT_BENEFITS,
+    MarketplaceOrder,
+    MembershipError,
+    MembershipService,
+    TierBenefits,
+    UserMembership,
+)
 from .backtesting import (
     BacktestConfig,
     BacktestEngine,
@@ -78,10 +94,16 @@ from .strategies import (
 )
 
 __all__ = [
+    "AIAssistantError",
+    "AIParseResult",
     "BacktestConfig",
     "BacktestEngine",
     "BacktestResult",
     "BollingerPoint",
+    "Comment",
+    "CommunityError",
+    "CommunityHub",
+    "DEFAULT_BENEFITS",
     "ETFFeatureAggregator",
     "ETFListing",
     "ETFPool",
@@ -97,6 +119,9 @@ __all__ = [
     "LeaderboardBuilder",
     "LeaderboardEntry",
     "MACDPoint",
+    "MarketplaceOrder",
+    "MembershipError",
+    "MembershipService",
     "OptimizationReport",
     "OptimizationTrial",
     "PriceBar",
@@ -111,6 +136,7 @@ __all__ = [
     "SelectionResult",
     "SentimentProvider",
     "SentimentSnapshot",
+    "SharedStrategy",
     "StockListing",
     "StockMetrics",
     "StockPool",
@@ -119,6 +145,8 @@ __all__ = [
     "StrategyRegistry",
     "StrategyRegistryError",
     "StrategyRule",
+    "TierBenefits",
+    "UserMembership",
     "WalkForwardReport",
     "bollinger_bands",
     "build_rebalance_plan",
@@ -128,6 +156,7 @@ __all__ = [
     "default_etf_strategy",
     "default_stock_strategy",
     "expand_grid",
+    "explain_strategy",
     "exponential_moving_average",
     "historical_var",
     "kdj",
@@ -135,6 +164,7 @@ __all__ = [
     "ma_trend_score",
     "macd",
     "max_drawdown",
+    "parse_prompt",
     "plan_from_selection",
     "relative_strength_index",
     "sample_etf_pool",
@@ -144,6 +174,7 @@ __all__ = [
     "score_total_return",
     "sharpe_ratio",
     "simple_moving_average",
+    "summarize_results",
     "time_series_metrics_provider",
     "to_price_bars",
     "to_returns",

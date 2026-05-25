@@ -1,6 +1,6 @@
 # A-Stock-Promotion
 
-A股智能选股策略引擎 — 纯 Python、零第三方依赖的 A 股 / ETF 多因子选股服务，涵盖策略筛选、回测优化、组合再平衡、运营榜单与管理端，并内置移动端和桌面端 Web UI。
+A股智能选股策略引擎 — 纯 Python、零第三方依赖的 A 股 / ETF 多因子选股服务，涵盖策略筛选、回测优化、组合再平衡、运营榜单、管理端、AI 选股助手、社区与付费体系，并内置移动端和桌面端 Web UI。
 
 ## 文档
 - [产品需求文档 (PRD)](docs/PRD.md)
@@ -43,6 +43,9 @@ PYTHONPATH=src python -m a_stock_promotion.api
 | `risk_metrics.py` | 风险指标：最大回撤、年化波动率、年化夏普比率、历史 VaR |
 | `leaderboards.py` | 运营榜单：按策略对全股票 / ETF 池打分排名（成长榜 / 蓝筹榜 / ETF 低波动榜等） |
 | `admin.py` | 策略注册表 CRUD，支持内置（只读）与自定义策略并存，线程安全 |
+| `ai_assistant.py` | **V2.0** — 中文自然语言 → 策略解析、策略解释、选股结果摘要 |
+| `community.py` | **V2.0** — 策略分享 / 订阅 / 评论的线程安全内存仓储 |
+| `membership.py` | **V2.0** — 会员等级、数据增值订阅、策略市场订单 |
 | `api.py` | 基于 `http.server` 的零依赖 REST API + 静态 Web UI 服务 |
 
 ---
@@ -85,6 +88,11 @@ PYTHONPATH=src python -m a_stock_promotion.api
 | `GET /api/etfs/{symbol}` | ETF 详情 + 因子快照 |
 | `GET /api/leaderboards` | 运营榜单（`universe=stock\|etf`、`top_n`、`only_selected`） |
 | `GET /api/admin/strategies` | 管理端策略列表（含内置标记） |
+| `GET /api/community/shares` | **V2.0** — 已发布社区策略列表（`owner` / `tag` / `only_free` 过滤） |
+| `GET /api/community/shares/{slug}` | **V2.0** — 社区策略详情 + 评论 |
+| `GET /api/ai/strategies/{name}/explain` | **V2.0** — 给定策略名生成中文解释 |
+| `GET /api/membership/benefits` | **V2.0** — free / pro / vip 会员权益对比 |
+| `GET /api/membership/users/{username}` | **V2.0** — 用户会员信息 + 历史订单 |
 
 ### POST 端点
 
@@ -97,6 +105,15 @@ PYTHONPATH=src python -m a_stock_promotion.api
 | `POST /api/backtest/optimize` | 网格参数优化（`parameter_grid`、`score=sharpe\|total_return\|calmar`，上限 64 个组合） |
 | `POST /api/backtest/walk-forward` | 走前验证（`in_sample_price_data`、`out_of_sample_price_data`） |
 | `POST /api/admin/strategies` | 创建自定义策略 |
+| `POST /api/ai/parse` | **V2.0** — 自然语言 → 策略 + 解释（`prompt`，可选 `name` / `username`） |
+| `POST /api/ai/summarize` | **V2.0** — 选股 + 中文摘要（`strategy` / `universe` / `top_n`） |
+| `POST /api/community/shares` | **V2.0** — 发布策略到社区（`slug` / `owner` / `price` / `tags` / `strategy`） |
+| `POST /api/community/shares/{slug}/subscribe` | **V2.0** — 订阅策略；付费策略需先购买 |
+| `POST /api/community/shares/{slug}/unsubscribe` | **V2.0** — 取消订阅 |
+| `POST /api/community/shares/{slug}/comments` | **V2.0** — 评论策略 |
+| `POST /api/membership/users` | **V2.0** — 创建 / 升级用户会员（`username` / `tier`） |
+| `POST /api/membership/addons` | **V2.0** — 订阅数据增值服务（`username` / `addon`） |
+| `POST /api/marketplace/purchase` | **V2.0** — 购买付费策略（按会员等级自动折扣） |
 
 ### PUT / DELETE 端点
 
