@@ -1490,4 +1490,11 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:  # pragma: no cover 
 
 
 if __name__ == "__main__":  # pragma: no cover
-    run()
+    import os
+
+    host = os.environ.get("HOST", "0.0.0.0")
+    try:
+        port = int(os.environ.get("PORT", "8080"))
+    except ValueError:
+        port = 8080
+    run(host=host, port=port)
