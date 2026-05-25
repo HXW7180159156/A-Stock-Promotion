@@ -17,10 +17,10 @@
 - ETF筛选、组合配置和风控指标联动。
 
 ## 4. 回测测试
-- 固定样本数据下结果可复现。
-- 交易成本、调仓频率、停牌、涨跌停处理。
-- 参数优化和样本外验证隔离。
-- 防止未来函数和幸存者偏差。
+- 固定样本数据下结果可复现。（`tests/test_backtesting.py::test_reproducible_on_fixed_sample`）
+- 交易成本、调仓频率、停牌、涨跌停处理。（`test_transaction_cost_reduces_equity`、`test_rebalance_frequency_changes_trade_count`、`test_non_tradable_bar_is_not_bought`）
+- 参数优化和样本外验证隔离。（`test_sample_split_isolation`）
+- 防止未来函数和幸存者偏差。（`test_no_lookahead_uses_rebalance_date_metrics_only`）
 
 ## 5. 移动端测试
 - 策略配置表单校验。
