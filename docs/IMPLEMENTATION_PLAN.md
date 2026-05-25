@@ -1,7 +1,7 @@
 # 代码实现方案
 
 ## 1. 当前实现范围
-本仓库已交付 PRD §4.1 MVP **和 §4.2 V1.0** 的端到端可运行版本。
+本仓库已交付 PRD §4.1 MVP **、§4.2 V1.0 与 §4.3 V2.0** 的端到端可运行版本。
 
 ### 1.1 MVP（PRD §4.1）
 - 股票池管理（A股基础股票池、行业/板块标签、可交易/ST 状态）。
@@ -21,6 +21,23 @@
 - **策略管理（管理端）**：`admin.py` 提供线程安全的内存 CRUD 注册表，通过 `/api/admin/strategies` 支持 GET/POST/PUT/DELETE，内置模板只读。
 - **桌面端 / 管理端 Web UI**：`web/desktop.html` + `web/desktop.js` + `web/desktop.css` 提供 ETF 筛选 / 组合再平衡 / 回测 / 运营榜单 / 策略管理 五个面板，部署在 `/desktop`。
 
+### 1.3 V2.0（PRD §4.3）
+- **AI 选股助手**：`ai_assistant.py` 提供基于关键词 + 操作短语 + 数值覆写的中文自然语言解析，将 “ROE 大于 12 同时 PE 不超过 25 同时北向资金净流入” 这类提示转为 `StrategyProfile`；同时输出可解释说明 (`explain_strategy`) 与选股结果摘要 (`summarize_results`)。REST 端点：
+  - `POST /api/ai/parse` — 自然语言 → 策略 + 解释 + 未识别 token；
+  - `GET  /api/ai/strategies/{name}/explain` — 策略 → 中文解释；
+  - `POST /api/ai/summarize` — 跑策略 + 输出 Top-N 选股摘要。
+- **社区（策略分享 / 订阅 / 评论）**：`community.py` 提供 `CommunityHub`（线程安全内存仓储），包含 `SharedStrategy` / `Comment` 实体、订阅人数与评论数计数器、所有者权限校验。REST 端点：
+  - `GET  /api/community/shares` — 按 owner/tag/价格筛选；
+  - `POST /api/community/shares` — 发布策略（自动复用 `admin` 的规则校验）；
+  - `GET  /api/community/shares/{slug}` — 详情 + 评论列表；
+  - `POST /api/community/shares/{slug}/subscribe|unsubscribe|comments` — 订阅 / 取消 / 评论。
+- **付费体系（会员 + 策略市场 + 数据增值）**：`membership.py` 提供 `MembershipService`，定义 free/pro/vip 三个等级的回测配额、AI 助手 / 优化器权限、市场折扣、可发布付费策略与含 add-on，并支持自定义加购的数据增值订阅。REST 端点：
+  - `GET  /api/membership/benefits` — 列出各等级权益；
+  - `POST /api/membership/users` + `GET /api/membership/users/{username}` — 升级 / 查询用户；
+  - `POST /api/membership/addons` — 订阅数据增值服务；
+  - `POST /api/marketplace/purchase` — 购买付费策略（自动按等级折扣计价；已发布 0 价的免费策略会被拒绝）。
+- **跨模块联动**：发布付费策略需 Pro/VIP；订阅付费策略需先购买；评论付费策略需购买或为作者；API 层把违约统一转换为 `403 Forbidden`。
+
 ## 2. 分层设计
 - `models.py`：股票指标、策略规则、策略配置和结果对象。
 - `selection_engine.py`：执行规则匹配、评分归一化和候选排序。
@@ -36,8 +53,11 @@
 - `portfolio.py`：组合再平衡计划生成器（V1.0）。
 - `leaderboards.py`：运营榜单聚合器（V1.0）。
 - `admin.py`：策略管理 CRUD 注册表（V1.0）。
+- `ai_assistant.py`：自然语言 → 策略解析、策略解释、结果摘要（V2.0）。
+- `community.py`：策略分享、订阅、评论的线程安全内存仓储（V2.0）。
+- `membership.py`：会员等级 / 数据增值 / 策略市场订单服务（V2.0）。
 - `api.py` + `web/`：基于 stdlib `http.server` 的零依赖 REST 服务，配套移动端 SPA 与桌面端 / 管理端 SPA。
-- `tests/`：核心引擎、指标、聚合器、API、回测、参数优化、ETF、组合、榜单、管理端等共 150+ 用例。
+- `tests/`：核心引擎、指标、聚合器、API、回测、参数优化、ETF、组合、榜单、管理端、AI 助手、社区、会员等共 210+ 用例。
 
 ## 3. 启动方式
 ```bash
@@ -55,12 +75,13 @@ PYTHONPATH=src python -m a_stock_promotion.api
 3. ~~回测执行器~~（已完成）、~~参数优化网格~~（已完成）；后续将回测排入异步队列。
 4. ~~ETF 模块 / 组合再平衡 / 桌面端管理端 / 运营榜单~~（V1.0 已完成）。
 5. 移动端原生工程（Flutter）：复用现有 REST API；当前 Web SPA 已覆盖 MVP 必需的“策略配置 / 选股结果 / 个股详情 / 风险提示”页面。
-6. 增加用户、策略保存、自选股、通知和订阅模块（V1.5+）。
-7. 接入鉴权、限流、审计与监控（生产化）。
+6. ~~AI 选股助手 / 社区 / 付费体系~~（V2.0 已完成 — 后端 + REST + 单元/集成测试，UI 集成可按需在桌面端 SPA 中增量补齐）。
+7. 接入真实支付网关、用户鉴权（OIDC）、限流、审计与监控（生产化）；将 `CommunityHub`、`MembershipService`、`StrategyRegistry` 替换为持久化实现即可平滑过渡。
 
 ## 5. 关键边界
 - 当前实现不连接真实交易系统。
 - 不承诺收益，只输出研究辅助结果。
 - 默认策略仅作为模板，生产环境应允许用户调整阈值与权重。
 - 示例数据集仅用于演示，正式上线前必须替换为合规授权的数据源。
-- 管理端策略注册表为内存实现；生产环境需替换为持久化存储并接入鉴权。
+- 管理端策略注册表、社区、会员服务均为内存实现；生产环境需替换为持久化存储并接入鉴权。
+- AI 助手为基于规则的确定性实现，不调用外部 LLM，因此可在内网/离线环境运行；要替换为大模型驱动只需在 API 层注入新的解析器，无需改动调用方。
