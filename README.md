@@ -1,5 +1,9 @@
 # A-Stock-Promotion
 
+[![CI](https://github.com/HXW7180159156/A-Stock-Promotion/actions/workflows/ci.yml/badge.svg)](https://github.com/HXW7180159156/A-Stock-Promotion/actions/workflows/ci.yml)
+[![Container](https://github.com/HXW7180159156/A-Stock-Promotion/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/HXW7180159156/A-Stock-Promotion/actions/workflows/docker-publish.yml)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/HXW7180159156/A-Stock-Promotion)
+
 A股智能选股策略引擎 — 纯 Python、零第三方依赖的 A 股 / ETF 多因子选股服务，涵盖策略筛选、回测优化、组合再平衡、运营榜单、管理端、AI 选股助手、社区与付费体系，并内置移动端和桌面端 Web UI。
 
 ## 文档
@@ -26,7 +30,20 @@ PYTHONPATH=src python -m a_stock_promotion.api
 # 一键构建并启动容器
 docker build -t a-stock-promotion .
 docker run --rm -p 8080:8080 a-stock-promotion
+
+# 或直接拉取 GitHub Container Registry 上由 CI 自动构建的镜像
+docker run --rm -p 8080:8080 ghcr.io/hxw7180159156/a-stock-promotion:latest
 ```
+
+### 在 GitHub 上运行
+
+| 方式 | 说明 |
+|---|---|
+| **GitHub Codespaces** | 点击上方 _Open in GitHub Codespaces_ 徽章，几秒后即可获得一个已自动转发 8080 端口、已启动 Web UI 的云端开发环境。 |
+| **GitHub Actions CI** | `.github/workflows/ci.yml` 在每次 push / PR 时跑全部单元测试（Python 3.10 / 3.11 / 3.12）。 |
+| **GitHub Container Registry (GHCR)** | `.github/workflows/docker-publish.yml` 在推到默认分支或打 `v*.*.*` tag 时，自动构建多标签镜像并推送到 `ghcr.io/<owner>/a-stock-promotion`，可直接被任意云平台拉取部署。 |
+
+完整步骤（含权限设置、Codespaces 端口可见性、镜像拉取示例）见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#在-github-上运行)。
 
 内置两个单页应用：
 

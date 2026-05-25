@@ -187,6 +187,61 @@ server {
 
 ---
 
+## 在 GitHub 上运行
+
+GitHub 不直接托管常驻 Web 服务，但仓库已经配置好以下三条 GitHub 原生通路，可以完整地把工程「跑在 GitHub 上」：
+
+### A. GitHub Actions —— CI
+
+`.github/workflows/ci.yml` 在每次 push / PR 时，矩阵化地在 Python 3.10 / 3.11 / 3.12 上跑：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+无需任何 secret 或额外配置，开箱即用。
+
+### B. GitHub Container Registry (GHCR) —— 镜像发布
+
+`.github/workflows/docker-publish.yml` 在以下事件触发时，自动调用根目录的 `Dockerfile` 构建并推送镜像到 `ghcr.io/<owner>/a-stock-promotion`：
+
+- push 到默认分支（`main` / `master`）
+- 打 tag `v*.*.*`（用于发版）
+- 手动 `workflow_dispatch`
+
+镜像会带上 `latest`、分支名、tag、短 SHA 等多种标签，方便不同部署场景。
+
+**首次使用前的一次性设置：**
+
+1. 仓库 → **Settings** → **Actions** → **General** → **Workflow permissions** 选择 **Read and write permissions**（让 `GITHUB_TOKEN` 能写 GHCR）。
+2. 首次推送成功后，到个人 / 组织 **Packages** 页面，把 `a-stock-promotion` 这个 package 的 **Package visibility** 改为 `Public`（若希望任何人都能 `docker pull`）。
+
+**拉取并运行：**
+
+```bash
+# 公网任意机器
+docker run --rm -p 8080:8080 ghcr.io/hxw7180159156/a-stock-promotion:latest
+
+# 私有镜像需要先登录
+echo "$GHCR_PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+
+之后这个镜像可直接喂给本文第 1–4 节的任意部署目标（Render / Railway / Fly.io / K8s / 云主机），不再需要现场构建。
+
+### C. GitHub Codespaces —— 一键启动可访问的运行实例
+
+`.devcontainer/devcontainer.json` 已配置好：基于 `python:3.12-bookworm` devcontainer 镜像，自动转发 `8080` 端口，进入后会先跑一遍单元测试，然后 attach 时自动执行 `python -m a_stock_promotion.api` 启动服务。
+
+操作步骤：
+
+1. 仓库主页点击 **Code → Codespaces → Create codespace on main**（或使用 README 的 _Open in GitHub Codespaces_ 徽章）。
+2. 等待环境就绪（约 1–2 分钟），底部 **PORTS** 面板会出现 8080 端口。
+3. 把 8080 的 **Port visibility** 改为 `Public`，即可拿到一个形如 `https://<codespace>-8080.app.github.dev` 的公网可访问地址。
+
+> 注意：Codespaces 适合**演示 / 体验 / 内部测试**，不是长期生产环境。生产请使用 GHCR 镜像部署到正式云平台。
+
+---
+
 ## 7. 合规与运维提示
 
 - 内置股票池为**演示样本**，不可用于实盘。生产环境请替换为合规授权数据源（AkShare、交易所等）。
